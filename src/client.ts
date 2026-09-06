@@ -3,6 +3,10 @@ import type {
   CnamOptions,
   CnamResult,
   CnamResponse,
+  EnhancedSpamOptions,
+  EnhancedSpamResult,
+  ExportHistoryOptions,
+  SystemStatusResult,
   LrnOptions,
   LrnResult,
   TrustData,
@@ -21,6 +25,11 @@ import type {
   BulkCnamResult,
   BulkLrnResult,
   BulkSpamResult,
+  SubmitJobOptions,
+  JobResult,
+  JobListResult,
+  JobStatus,
+  JobInvalidExample,
   ErrorCode,
 } from './types';
 
@@ -39,6 +48,7 @@ const SDK_VERSION = '1.2.0';
 const DEFAULT_BASE_URL = 'https://api-service.verirouteintel.io';
 const DEFAULT_TIMEOUT = 30000;
 const DEFAULT_RETRIES = 3;
+const JOB_MAX_NUMBERS = 100000;
 
 interface RawBulkResponse {
   job_id?: string;
@@ -209,10 +219,11 @@ export class VeriRoute {
   ): VeriRouteError {
     const rawError = data.error;
 
-    // Handle string error format
+    // Handle string error format (the jobs endpoints use this shape:
+    // { "error": "<message>", "code": "<CODE>" })
     if (typeof rawError === 'string') {
-      const code = ((data.code as string) || 'SERVER_ERROR') as ErrorCode;
-      return new VeriRouteError(rawError, code, statusCode);
+      const code = (data.code as string) || 'SERVER_ERROR';
+      return this.errorFromCode(code, rawError, statusCode, undefined);
     }
 
     // Handle object error format
@@ -224,7 +235,15 @@ export class VeriRoute {
 
     const code = error.code || 'UNKNOWN_ERROR';
     const message = error.message || `Request failed with status ${statusCode}`;
+    return this.errorFromCode(code, message, statusCode, error.details);
+  }
 
+  private errorFromCode(
+    code: string,
+    message: string,
+    statusCode: number,
+    details?: Record<string, unknown>
+  ): VeriRouteError {
     switch (code) {
       case 'AUTH_REQUIRED':
       case 'AUTH_FAILED':
@@ -238,17 +257,17 @@ export class VeriRoute {
 
       case 'INVALID_PHONE_NUMBER':
       case 'MISSING_PHONE_NUMBER':
-        return new InvalidPhoneError(message, error.details?.phone_number as string);
+        return new InvalidPhoneError(message, details?.phone_number as string);
 
       case 'INTERNATIONAL_NOT_SUPPORTED':
         return new InternationalNotSupportedError(
           message,
-          error.details?.phone_number as string,
-          error.details?.detected_country_code as number
+          details?.phone_number as string,
+          details?.detected_country_code as number
         );
 
       default:
-        return new VeriRouteError(message, code as ErrorCode, statusCode, error.details);
+        return new VeriRouteError(message, code as ErrorCode, statusCode, details);
     }
   }
 
@@ -283,7 +302,14 @@ export class VeriRoute {
       include_spam: options?.includeSpam ?? false,
     });
 
-    return response.data;
+    // The API returns snake_case spam_type inside data
+    const data = response.data as unknown as Record<string, unknown>;
+    return {
+      number: (data.number ?? phoneNumber) as string,
+      cnam: (data.cnam ?? null) as string | null,
+      spamType: data.spam_type as CnamResult['spamType'],
+      raw: data,
+    };
   }
 
   /**
@@ -307,11 +333,13 @@ export class VeriRoute {
     const summary = response.summary ?? {};
 
     return {
+      // Bulk rows carry the caller name as 'cnam_record', not 'cnam'.
       results: okItems.map((r) => ({
         number: (r.number ?? r.phone_number ?? '') as string,
         phoneNumber: (r.number ?? r.phone_number ?? '') as string,
-        cnam: (r.cnam ?? null) as string | null,
+        cnam: (r.cnam ?? r.cnam_record ?? null) as string | null,
         spamType: r.spam_type as CnamResult['spamType'],
+        raw: r,
       })),
       errors,
       total: (summary.submitted as number) ?? phoneNumbers.length,
@@ -403,19 +431,35 @@ export class VeriRoute {
     };
   }
 
+  /**
+   * The single endpoint returns 'lrn' / 'enhanced_lrn' / a nested 'messaging'
+   * object; bulk rows use 'lrn_value' / 'enhanced_lrn_data' / 'voice_provider'
+   * and flat 'messaging_*' fields. Accept both.
+   */
   private transformLrnResponse(data: Record<string, unknown>): LrnResult {
-    const enhanced = (data.enhanced_lrn || data.enhanced) as Record<string, unknown> | undefined;
-    const messaging = data.messaging as Record<string, unknown> | undefined;
+    const enhanced = (data.enhanced_lrn || data.enhanced || data.enhanced_lrn_data) as
+      | Record<string, unknown>
+      | undefined;
+    let messaging = data.messaging as Record<string, unknown> | undefined;
+    if (messaging === undefined && 'messaging_provider' in data) {
+      messaging = {
+        provider: data.messaging_provider,
+        enabled: data.messaging_enabled,
+        country: data.messaging_country,
+        country_code: data.messaging_country_code,
+      };
+    }
     const cnam = data.cnam as Record<string, unknown> | string | undefined;
     const trust = data.trust as Record<string, unknown> | undefined;
 
     // Extract carrier and lineType from enhanced data if not at top level
-    const carrier = (data.carrier || enhanced?.carrier || '') as string;
+    // (bulk rows carry the carrier as 'voice_provider')
+    const carrier = (data.carrier || data.voice_provider || enhanced?.carrier || '') as string;
     const lineType = (data.line_type || enhanced?.carrier_type || 'unknown') as 'mobile' | 'landline' | 'voip' | 'unknown';
 
     return {
       phoneNumber: data.phone_number as string,
-      lrn: data.lrn as string | null,
+      lrn: (data.lrn ?? data.lrn_value ?? null) as string | null,
       lrnActivatedAt: data.lrn_activated_at as string | null,
       carrier,
       lineType,
@@ -463,6 +507,7 @@ export class VeriRoute {
             lastUpdated: (trust.last_updated ?? '') as string,
           }
         : undefined,
+      raw: data,
     };
   }
 
@@ -501,6 +546,7 @@ export class VeriRoute {
       firstReported: data.first_reported ?? null,
       lastReported: data.last_reported ?? null,
       details: data.details ?? '',
+      raw: data as unknown as Record<string, unknown>,
     };
   }
 
@@ -538,6 +584,7 @@ export class VeriRoute {
       reputationScore: data.reputation_score ?? 85,
       trustLevel: (data.trust_level ?? 'high') as TrustResultV2['trustLevel'],
       lastUpdated: data.last_updated ?? '',
+      raw: data as unknown as Record<string, unknown>,
     };
   }
 
@@ -558,6 +605,7 @@ export class VeriRoute {
       spamType: (response.spam_type ?? 'NONE') as SpamResult['spamType'],
       cached: (response.cached ?? false) as boolean,
       source: (response.source ?? 'unknown') as string,
+      raw: response,
     };
   }
 
@@ -573,14 +621,17 @@ export class VeriRoute {
     const summary = response.summary ?? {};
 
     return {
+      // Batch rows carry the spam source/cache flags as 'spam_source' /
+      // 'spam_cached' rather than 'source' / 'cached'.
       results: okItems.map((r) => ({
         phoneNumber: r.phone_number as string,
         isSpam: (r.is_spam ?? false) as boolean,
         isRobocall: (r.is_robocall ?? false) as boolean,
         isScam: (r.is_scam ?? false) as boolean,
         spamType: (r.spam_type ?? 'NONE') as SpamResult['spamType'],
-        cached: (r.cached ?? false) as boolean,
-        source: (r.source ?? 'unknown') as string,
+        cached: (r.cached ?? r.spam_cached ?? false) as boolean,
+        source: (r.source ?? r.spam_source ?? 'unknown') as string,
+        raw: r,
       })),
       errors,
       total: (summary.submitted as number) ?? phoneNumbers.length,
@@ -605,13 +656,74 @@ export class VeriRoute {
    * ```
    */
   async spamReport(phoneNumber: string, options: SpamReportOptions): Promise<SpamReportResult> {
-    return this.request<SpamReportResult>('POST', '/api/v1/spam/report', {
+    const response = await this.request<Record<string, unknown>>('POST', '/api/v1/spam/report', {
       phone_number: phoneNumber,
       report_type: options.reportType,
       details: options.details,
       message_content: options.messageContent,
       carrier_ocn: options.carrierOcn,
     });
+
+    const data = (response.data ?? {}) as Record<string, unknown>;
+    return {
+      success: (response.success ?? true) as boolean,
+      message: (response.message ?? 'Report submitted') as string,
+      phoneNumber: (data.phone_number ?? null) as string | null,
+      reportType: (data.report_type ?? null) as string | null,
+      reportedAt: (data.reported_at ?? null) as string | null,
+      complaintCount: (data.complaint_count ?? null) as number | null,
+      reportId: (response.report_id ?? 0) as number,
+      carrierId: (response.carrier_id ?? null) as number | null,
+      carrierName: (response.carrier_name ?? null) as string | null,
+      raw: response,
+    };
+  }
+
+  /**
+   * Enhanced multi-source spam lookup with composite scoring
+   *
+   * Queries the primary provider, crowdsourced complaint sources, and
+   * internal user reports, and returns per-category scores (0-1) with a
+   * confidence rating. Billed the same as a spam lookup.
+   *
+   * @example
+   * ```typescript
+   * const result = await vri.spamEnhanced('+15551234567');
+   * console.log(result.spamScore);   // 0.85
+   * console.log(result.confidence);  // 0.9
+   * console.log(result.sources);     // ['mcl_provider', 'user_reports']
+   * ```
+   */
+  async spamEnhanced(phoneNumber: string, options?: EnhancedSpamOptions): Promise<EnhancedSpamResult> {
+    const response = await this.request<{ success?: boolean; data?: Record<string, unknown> }>(
+      'POST',
+      '/api/v1/spam/lookup/enhanced',
+      {
+        phone_number: phoneNumber,
+        include_web_sources: options?.includeWebSources ?? true,
+        include_google: options?.includeGoogle ?? false,
+      }
+    );
+
+    const data = response.data ?? {};
+    return {
+      phoneNumber: (data.phone_number ?? phoneNumber) as string,
+      isSpam: (data.is_spam ?? false) as boolean,
+      isRobocall: (data.is_robocall ?? false) as boolean,
+      isScam: (data.is_scam ?? false) as boolean,
+      spamScore: (data.spam_score ?? 0) as number,
+      robocallScore: (data.robocall_score ?? 0) as number,
+      scamScore: (data.scam_score ?? 0) as number,
+      confidence: (data.confidence ?? 0) as number,
+      totalComplaints: (data.total_complaints ?? 0) as number,
+      sources: (data.sources ?? []) as string[],
+      categories: (data.categories ?? []) as string[],
+      sourceDetails: (data.source_details ?? []) as Record<string, unknown>[],
+      lookupTime: (data.lookup_time ?? null) as string | null,
+      lookupDurationMs: (data.lookup_duration_ms ?? null) as number | null,
+      error: (data.error ?? null) as string | null,
+      raw: data,
+    };
   }
 
   // ===========================================================================
@@ -640,6 +752,219 @@ export class VeriRoute {
       messagingCountry: response.messaging_country as string,
       messagingCountryCode: response.messaging_country_code as string,
       referenceId: response.reference_id as string,
+      raw: response,
+    };
+  }
+
+  // ===========================================================================
+  // Async Jobs (bulk lookups beyond the 1,000-number synchronous cap)
+  // ===========================================================================
+
+  /**
+   * Submit an async bulk lookup job (up to 100,000 numbers)
+   *
+   * The job runs in the background at the same per-lookup pricing as the
+   * synchronous endpoints. The full estimated cost is reserved from your
+   * balance at submission and settled to actual usage on completion.
+   * Duplicates are removed (charged once); invalid numbers are skipped,
+   * reported, and never charged.
+   *
+   * Poll jobStatus(jobId), or supply a webhookUrl to receive a
+   * 'job.completed' POST when the job finishes. With a webhookSecret, the
+   * webhook carries an HMAC-SHA256 X-Webhook-Signature header - verify it
+   * with verifyWebhookSignature().
+   *
+   * @param phoneNumbers - Array of phone numbers (up to 100,000)
+   * @param options - Lookup options and webhook settings
+   * @returns Job result with jobId, reservation details, and input summary
+   *
+   * @example
+   * ```typescript
+   * const job = await vri.submitJob(numbers, {
+   *   includeEnhanced: true,
+   *   webhookUrl: 'https://example.com/hooks/vri',
+   *   webhookSecret: 'your-shared-secret',
+   * });
+   * console.log(job.jobId);
+   * console.log(job.billing.estimatedCost);
+   * ```
+   */
+  async submitJob(phoneNumbers: string[], options?: SubmitJobOptions): Promise<JobResult> {
+    if (phoneNumbers.length > JOB_MAX_NUMBERS) {
+      throw new InvalidPhoneError(`Maximum ${JOB_MAX_NUMBERS} phone numbers per job`);
+    }
+
+    const body: Record<string, unknown> = {
+      phone_numbers: phoneNumbers,
+      include_lrn: options?.includeLrn ?? true,
+      include_enhanced: options?.includeEnhanced ?? false,
+      include_cnam: options?.includeCnam ?? false,
+      include_trust: options?.includeTrust ?? false,
+      include_messaging: options?.includeMessaging ?? false,
+    };
+    if (options?.webhookUrl) {
+      body.webhook_url = options.webhookUrl;
+    }
+    if (options?.webhookSecret) {
+      body.webhook_secret = options.webhookSecret;
+    }
+
+    const response = await this.request<Record<string, unknown>>('POST', '/api/v1/jobs', body);
+    return this.transformJobResponse(response);
+  }
+
+  /**
+   * Get status, counts, and billing for one async job
+   *
+   * Returns live counts; billing.actualCost is set once the job settles and
+   * links.resultsUrl once results are downloadable.
+   *
+   * @example
+   * ```typescript
+   * const job = await vri.jobStatus(jobId);
+   * if (job.status === 'COMPLETED') {
+   *   const csv = await vri.jobResults(jobId);
+   * }
+   * ```
+   */
+  async jobStatus(jobId: string): Promise<JobResult> {
+    const response = await this.request<Record<string, unknown>>('GET', `/api/v1/jobs/${jobId}`);
+    return this.transformJobResponse(response);
+  }
+
+  /**
+   * Download the result CSV for a completed async job
+   *
+   * @param jobId - The job id returned by submitJob()
+   * @returns The result CSV as text
+   * @throws VeriRouteError - JOB_NOT_COMPLETED (409) while the job is still
+   *   running, JOB_NOT_FOUND (404), or RESULTS_UNAVAILABLE (410) if the
+   *   result file has expired
+   */
+  async jobResults(jobId: string): Promise<string> {
+    return this.requestText(`/api/v1/jobs/${jobId}/results`);
+  }
+
+  /** Raw-text GET (CSV downloads) with the standard auth and error mapping. */
+  private async requestText(path: string, params?: Record<string, string>): Promise<string> {
+    const url = new URL(`${this.baseUrl}${path}`);
+    if (params) {
+      Object.entries(params).forEach(([key, value]) => {
+        if (value !== undefined) {
+          url.searchParams.set(key, value);
+        }
+      });
+    }
+
+    const headers: Record<string, string> = {
+      Authorization: `Bearer ${this.apiKey}`,
+      Accept: 'text/csv',
+      'User-Agent': `verirouteintel-node/${SDK_VERSION}`,
+    };
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), this.timeout);
+
+    try {
+      const response = await fetch(url.toString(), { method: 'GET', headers, signal: controller.signal });
+
+      if (!response.ok) {
+        let data: Record<string, unknown> = {};
+        try {
+          data = (await response.json()) as Record<string, unknown>;
+        } catch {
+          // Non-JSON error body; fall through to a generic error
+        }
+        throw this.handleErrorResponse(response.status, data);
+      }
+
+      return await response.text();
+    } catch (error) {
+      if (error instanceof VeriRouteError) {
+        throw error;
+      }
+      if (error instanceof Error && error.name === 'AbortError') {
+        throw new TimeoutError();
+      }
+      throw new NetworkError(error instanceof Error ? error.message : undefined);
+    } finally {
+      clearTimeout(timeoutId);
+    }
+  }
+
+  /**
+   * List this account's most recent async jobs (newest first, up to 50)
+   *
+   * @example
+   * ```typescript
+   * const recent = await vri.listJobs();
+   * for (const job of recent.jobs) {
+   *   console.log(job.jobId, job.status);
+   * }
+   * ```
+   */
+  async listJobs(): Promise<JobListResult> {
+    const response = await this.request<{ jobs?: Record<string, unknown>[]; count?: number }>(
+      'GET',
+      '/api/v1/jobs'
+    );
+    const jobs = (response.jobs ?? []).map((j) => this.transformJobResponse(j));
+    return { jobs, count: response.count ?? jobs.length };
+  }
+
+  private transformJobResponse(data: Record<string, unknown>): JobResult {
+    const summary = (data.summary ?? {}) as Record<string, unknown>;
+    const options = (data.options ?? {}) as Record<string, unknown>;
+    const billing = (data.billing ?? {}) as Record<string, unknown>;
+    const timing = (data.timing ?? {}) as Record<string, unknown>;
+    const webhook = (data.webhook ?? {}) as Record<string, unknown>;
+    const links = (data.links ?? {}) as Record<string, unknown>;
+
+    return {
+      jobId: (data.job_id ?? '') as string,
+      status: (data.status ?? 'SUBMITTED') as JobStatus,
+      summary: {
+        submitted: (summary.submitted ?? 0) as number,
+        unique: (summary.unique ?? 0) as number,
+        duplicatesRemoved: (summary.duplicates_removed ?? 0) as number,
+        invalid: (summary.invalid ?? 0) as number,
+        processed: (summary.processed ?? 0) as number,
+        failed: (summary.failed ?? 0) as number,
+        invalidExamples: ((summary.invalid_examples ?? []) as Record<string, unknown>[]).map(
+          (e): JobInvalidExample => ({
+            input: (e.input ?? null) as string | null,
+            error: (e.error ?? null) as string | null,
+          })
+        ),
+      },
+      options: {
+        lrn: (options.lrn ?? false) as boolean,
+        enhancedLrn: (options.enhanced_lrn ?? false) as boolean,
+        cnam: (options.cnam ?? false) as boolean,
+        spam: (options.spam ?? false) as boolean,
+        messagingProvider: (options.messaging_provider ?? false) as boolean,
+      },
+      billing: {
+        estimatedCost: (billing.estimated_cost ?? null) as number | null,
+        actualCost: (billing.actual_cost ?? null) as number | null,
+        billingStatus: (billing.billing_status ?? null) as string | null,
+      },
+      timing: {
+        submittedAt: (timing.submitted_at ?? null) as string | null,
+        startedAt: (timing.started_at ?? null) as string | null,
+        completedAt: (timing.completed_at ?? null) as string | null,
+        durationMs: (timing.duration_ms ?? null) as number | null,
+      },
+      webhook: {
+        configured: (webhook.configured ?? false) as boolean,
+        status: (webhook.status ?? null) as string | null,
+      },
+      links: {
+        statusUrl: (links.status_url ?? null) as string | null,
+        resultsUrl: (links.results_url ?? null) as string | null,
+      },
+      errorMessage: (data.error_message ?? null) as string | null,
+      raw: data,
     };
   }
 
@@ -675,6 +1000,7 @@ export class VeriRoute {
       providerCategoryBreakdown: data.provider_category_breakdown as Record<string, number>,
       geographicBreakdown: data.geographic_breakdown as Record<string, number>,
       trends: data.trends as Array<{ date: string; count: number }>,
+      raw: data,
     };
   }
 
@@ -701,6 +1027,26 @@ export class VeriRoute {
    * });
    */
   async usage(options: UsageOptions = {}): Promise<UsageResult> {
+    return this.requestUsageReport('/api/v1/reports/usage', options);
+  }
+
+  /**
+   * Get aggregated usage across ALL of your API keys
+   *
+   * Same parameters and shape as usage(), but not filtered to the calling
+   * key (result.apiKey is undefined).
+   *
+   * @example
+   * ```typescript
+   * const usage = await vri.usageAll({ period: 'month' });
+   * console.log(usage.totalLookups);
+   * ```
+   */
+  async usageAll(options: UsageOptions = {}): Promise<UsageResult> {
+    return this.requestUsageReport('/api/v1/reports/usage/all', options);
+  }
+
+  private async requestUsageReport(basePath: string, options: UsageOptions): Promise<UsageResult> {
     const params = new URLSearchParams();
     if (options.period) params.set('period', options.period);
     if (options.startDate) params.set('start_date', options.startDate);
@@ -708,10 +1054,11 @@ export class VeriRoute {
     if (options.groupBy) params.set('group_by', options.groupBy);
 
     const queryString = params.toString();
-    const path = queryString ? `/api/v1/reports/usage?${queryString}` : '/api/v1/reports/usage';
+    const path = queryString ? `${basePath}?${queryString}` : basePath;
 
     const response = await this.request<{
       data: {
+        api_key?: { id: number; alias: string };
         period: { start: string; end: string };
         summary: { total_lookups: number; total_spent: number };
         by_product: Record<string, number>;
@@ -730,6 +1077,86 @@ export class VeriRoute {
       spamBreakdown: data.spam_breakdown,
       period: data.period,
       timeSeries: data.time_series,
+      apiKey: data.api_key,
+    };
+  }
+
+  /**
+   * Export lookup history for this API key as CSV
+   *
+   * Columns include timestamp, phone number, products, amount, LRN, carrier,
+   * CNAM, messaging, and spam fields.
+   *
+   * @param options - Date range and record limit
+   * @returns The export CSV as text
+   *
+   * @example
+   * ```typescript
+   * const csv = await vri.exportHistory({ startDate: '2026-08-01' });
+   * await fs.promises.writeFile('history.csv', csv);
+   * ```
+   */
+  async exportHistory(options: ExportHistoryOptions = {}): Promise<string> {
+    const params: Record<string, string> = {};
+    if (options.startDate) params.start_date = options.startDate;
+    if (options.endDate) params.end_date = options.endDate;
+    if (options.limit !== undefined) params.limit = String(options.limit);
+
+    return this.requestText('/api/v1/reports/export', params);
+  }
+
+  // ===========================================================================
+  // Pricing & Platform Status
+  // ===========================================================================
+
+  /**
+   * Get the per-lookup rate card
+   *
+   * Returns the current price per lookup for each product, keyed by product
+   * name (e.g. 'lrn', 'enhanced_lrn', 'cnam', 'spam', 'messaging_provider').
+   * Useful for estimating cost before a bulk submission.
+   *
+   * @example
+   * ```typescript
+   * const rates = await vri.pricing();
+   * const cost = rates.lrn * numbers.length;
+   * ```
+   */
+  async pricing(): Promise<Record<string, number>> {
+    const response = await this.request<{ success?: boolean; pricing?: Record<string, number> }>(
+      'GET',
+      '/api/v1/pricing/all'
+    );
+    return response.pricing ?? {};
+  }
+
+  /**
+   * Get component-level platform status
+   *
+   * Cheap connectivity/health check - no API key required and never billed.
+   * Component statuses are 'operational', 'degraded', or 'outage'; the
+   * top-level status is the worst component.
+   *
+   * @example
+   * ```typescript
+   * const s = await vri.status();
+   * console.log(s.status); // "operational"
+   * for (const c of s.components) console.log(c.name, c.status);
+   * ```
+   */
+  async status(): Promise<SystemStatusResult> {
+    const response = await this.request<Record<string, unknown>>('GET', '/api/v1/status');
+    const components = (response.components ?? []) as Record<string, unknown>[];
+    return {
+      status: (response.status ?? 'operational') as string,
+      updatedAt: (response.updated_at ?? '') as string,
+      components: components.map((c) => ({
+        key: (c.key ?? '') as string,
+        name: (c.name ?? '') as string,
+        status: (c.status ?? 'operational') as string,
+        detail: (c.detail ?? null) as string | null,
+      })),
+      raw: response,
     };
   }
 

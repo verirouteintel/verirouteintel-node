@@ -6,7 +6,9 @@
  * Run with: npx ts-node validate-sdk.ts <api_key> [phone_number]
  */
 
-import { VeriRoute, VRI } from './src';
+import { createHmac } from 'crypto';
+
+import { VeriRoute, VRI, verifyWebhookSignature } from './src';
 
 const GREEN = '\x1b[92m';
 const RED = '\x1b[91m';
@@ -158,6 +160,42 @@ async function validateMessaging(vri: VeriRoute, phone: string): Promise<boolean
   }
 }
 
+async function validatePricing(vri: VeriRoute): Promise<boolean> {
+  console.log('\n=== Pricing Validation ===');
+
+  try {
+    const rates = await vri.pricing();
+    printResult('pricing() returns object', typeof rates === 'object');
+    printResult('Has at least one product', Object.keys(rates).length > 0);
+    printResult('Prices are numbers', Object.values(rates).every((v) => typeof v === 'number'));
+    console.log(`         Rates: ${JSON.stringify(rates)}`);
+    return true;
+  } catch (e: any) {
+    printResult('pricing request', false, `Error: ${e.message}`);
+    return false;
+  }
+}
+
+async function validateStatus(vri: VeriRoute): Promise<boolean> {
+  console.log('\n=== System Status Validation ===');
+
+  try {
+    const result = await vri.status();
+    printResult("Has 'status' field", ['operational', 'degraded', 'outage'].includes(result.status));
+    printResult("Has 'updatedAt' field", Boolean(result.updatedAt));
+    printResult('Has components', result.components.length > 0);
+    if (result.components.length > 0) {
+      const c = result.components[0];
+      printResult('Component has key/name/status', Boolean(c.key) && Boolean(c.name) && Boolean(c.status));
+    }
+    console.log(`         Status: ${result.status} (${result.components.length} components)`);
+    return true;
+  } catch (e: any) {
+    printResult('status request', false, `Error: ${e.message}`);
+    return false;
+  }
+}
+
 async function validateKey(vri: VeriRoute): Promise<boolean> {
   console.log('\n=== API Key Validation ===');
 
@@ -197,6 +235,37 @@ async function validateErrorHandling(vri: VeriRoute): Promise<boolean> {
   return true;
 }
 
+async function validateWebhookVerification(): Promise<boolean> {
+  console.log('\n=== Webhook Signature Validation ===');
+
+  const secret = 'test-secret';
+  const body = '{"event":"job.completed","job":{"id":"abc"}}';
+  const digest = createHmac('sha256', secret).update(body).digest('hex');
+
+  let ok = true;
+  let result = await verifyWebhookSignature(body, `sha256=${digest}`, secret);
+  printResult('Valid signature accepted (sha256= prefix)', result);
+  ok = ok && result;
+
+  result = await verifyWebhookSignature(Buffer.from(body), digest, secret);
+  printResult('Valid signature accepted (bytes body, bare hex)', result);
+  ok = ok && result;
+
+  result = !(await verifyWebhookSignature(body, `sha256=${digest}`, 'wrong-secret'));
+  printResult('Wrong secret rejected', result);
+  ok = ok && result;
+
+  result = !(await verifyWebhookSignature(body + ' ', `sha256=${digest}`, secret));
+  printResult('Tampered body rejected', result);
+  ok = ok && result;
+
+  result = !(await verifyWebhookSignature(body, '', secret));
+  printResult('Empty signature rejected', result);
+  ok = ok && result;
+
+  return ok;
+}
+
 function validateVriAlias(): boolean {
   console.log('\n=== VRI Alias Validation ===');
   printResult('VRI is VeriRoute', VRI === VeriRoute);
@@ -221,8 +290,9 @@ async function main(): Promise<void> {
   console.log('API Base: https://api-service.verirouteintel.io');
   console.log(`Test Phone: ${phone}`);
 
-  // Validate alias first (no API call needed)
+  // Validate alias + webhook helper first (no API call needed)
   validateVriAlias();
+  const webhookOk = await validateWebhookVerification();
 
   // Create client
   const vri = new VeriRoute(apiKey);
@@ -241,7 +311,10 @@ async function main(): Promise<void> {
   results.push(['Trust', await validateTrust(vri, phone)]);
   results.push(['Spam', await validateSpam(vri, phone)]);
   results.push(['Messaging', await validateMessaging(vri, phone)]);
+  results.push(['Pricing', await validatePricing(vri)]);
+  results.push(['System Status', await validateStatus(vri)]);
   results.push(['Error Handling', await validateErrorHandling(vri)]);
+  results.push(['Webhook Signature', webhookOk]);
 
   // Summary
   console.log('\n' + '='.repeat(60));

@@ -10,6 +10,37 @@ Official Node.js/TypeScript SDK for [VeriRoute Intel](https://verirouteintel.com
 - **Messaging Provider** - SMS/MMS routing information
 - **Spam Detection** - Robocall, scam, and spam flagging
 - **Bulk Operations** - Up to 1,000 numbers per request
+- **Async Jobs** - Background jobs for up to 100,000 numbers with completion webhooks
+- **Webhook Verification** - One-call HMAC-SHA256 signature verification
+- **Enhanced Spam** - Multi-source spam lookup with composite scoring
+- **Pricing & Status** - Programmatic rate card and platform status
+
+## Endpoint Coverage
+
+| SDK method | Endpoint |
+|---|---|
+| `cnam()` / `cnamBulk()` | `POST /api/v1/cnam` / `POST /api/v1/cnam/bulk` |
+| `lrn()` / `lrnBulk()` | `POST /api/v1/lrn` / `POST /api/v1/lrn/bulk` |
+| `messaging()` | `POST /api/v1/messaging` |
+| `trust()` / `trustV2()` | `POST /api/v1/trust` / `POST /api/v2/trust` |
+| `spam()` / `spamBatch()` | `POST /api/v1/spam` / `POST /api/v1/spam/batch` |
+| `spamEnhanced()` | `POST /api/v1/spam/lookup/enhanced` |
+| `spamReport()` | `POST /api/v1/spam/report` |
+| `submitJob()` / `jobStatus()` / `jobResults()` / `listJobs()` | `POST /api/v1/jobs` / `GET /api/v1/jobs/<id>` / `GET /api/v1/jobs/<id>/results` / `GET /api/v1/jobs` |
+| `analytics()` | `GET /api/v1/analytics` |
+| `usage()` / `usageAll()` | `GET /api/v1/reports/usage` / `GET /api/v1/reports/usage/all` |
+| `exportHistory()` | `GET /api/v1/reports/export` |
+| `pricing()` | `GET /api/v1/pricing/all` |
+| `status()` | `GET /api/v1/status` |
+| `validateKey()` | `POST /api/v1/auth/validate-key` |
+
+The single-number `lrn()` call with `includeEnhanced` / `includeCnam` /
+`includeTrust` / `messagingLookup` is the combined-products lookup - one
+call, one number, every product you select.
+
+**Unrecognized response fields are preserved**: every typed result carries
+the untransformed response item on its `raw` property, so fields added to
+the API after this SDK release are never silently dropped.
 
 ## Installation
 
@@ -169,12 +200,23 @@ console.log(spam.spamType);  // "NONE"
 // Batch spam check
 const batch = await vri.spamBatch(['+15551234567', '+15559876543']);
 
+// Enhanced multi-source spam lookup with composite scoring
+const enhanced = await vri.spamEnhanced('+15551234567');
+console.log(enhanced.spamScore);       // 0.0-1.0 composite spam score
+console.log(enhanced.robocallScore);   // 0.0-1.0
+console.log(enhanced.confidence);      // 0.0-1.0 confidence in the verdict
+console.log(enhanced.sources);         // Sources with a finding
+console.log(enhanced.totalComplaints); // Complaints found across sources
+
 // Report spam
-await vri.spamReport('+15551234567', {
+const report = await vri.spamReport('+15551234567', {
   reportType: 'robocall', // 'spam' | 'robocall' | 'scam' | 'telemarketing' | 'fraud' | 'phishing'
   details: 'Automated warranty scam call',
   messageContent: 'Your car warranty is expiring...', // optional
 });
+console.log(report.success);        // true
+console.log(report.phoneNumber);    // "+15551234567" (E.164)
+console.log(report.complaintCount); // Total complaints now on record
 ```
 
 ### Messaging Provider
@@ -221,9 +263,109 @@ for (const entry of customUsage.timeSeries) {
   console.log(`${entry.date}: ${entry.count} lookups, $${entry.spent.toFixed(2)}`);
 }
 
+// Aggregated usage across ALL of your API keys (same parameters)
+const allUsage = await vri.usageAll({ period: 'month' });
+console.log(allUsage.totalLookups);
+
+// Export lookup history for this key as CSV
+const csv = await vri.exportHistory({ startDate: '2026-08-01', limit: 5000 });
+await fs.promises.writeFile('history.csv', csv);
+
 // Validate API key
 const isValid = await vri.validateKey();
 ```
+
+### Pricing & Platform Status
+
+```typescript
+// Current price per lookup for each product - estimate costs programmatically
+const rates = await vri.pricing();
+console.log(rates); // { lrn: 0.0005, cnam: 0.006, spam: 0.007, ... }
+const estimated = rates.lrn * numbers.length;
+
+// Cheap connectivity check - no API key required, never billed
+const s = await vri.status();
+console.log(s.status); // "operational" | "degraded" | "outage"
+for (const component of s.components) {
+  console.log(component.name, component.status, component.detail);
+}
+```
+
+### Async Jobs (up to 100,000 numbers)
+
+For lists beyond the 1,000-number synchronous cap, submit an async job. The
+job runs in the background at the same per-lookup pricing; the estimated
+cost is reserved from your balance at submission and settled to actual
+usage on completion. Duplicates are removed (charged once) and invalid
+numbers are skipped, reported, and never charged.
+
+```typescript
+// Submit a job
+const job = await vri.submitJob(numbers, {
+  includeEnhanced: true,
+  includeCnam: true,
+});
+console.log(job.jobId);                 // UUID
+console.log(job.status);                // "SUBMITTED"
+console.log(job.summary.unique);        // Unique valid numbers to process
+console.log(job.summary.invalid);       // Invalid inputs skipped (with examples)
+console.log(job.billing.estimatedCost); // Amount reserved from your balance
+
+// Poll for completion
+let current = job;
+while (current.status !== 'COMPLETED' && current.status !== 'FAILED') {
+  await new Promise((r) => setTimeout(r, 5000));
+  current = await vri.jobStatus(job.jobId);
+}
+
+// Download the result CSV
+if (current.status === 'COMPLETED') {
+  const csv = await vri.jobResults(job.jobId);
+  await fs.promises.writeFile('results.csv', csv);
+  console.log(current.billing.actualCost); // Settled cost
+}
+
+// List your 50 most recent jobs
+const recent = await vri.listJobs();
+for (const j of recent.jobs) {
+  console.log(j.jobId, j.status);
+}
+```
+
+### Completion Webhooks
+
+Instead of polling, supply a `webhookUrl` and VeriRoute Intel POSTs a
+`job.completed` event when the job finishes. With a `webhookSecret`, the
+request carries an HMAC-SHA256 signature in the `X-Webhook-Signature`
+header (`sha256=<hex>`), computed over the raw request body:
+
+```typescript
+const job = await vri.submitJob(numbers, {
+  webhookUrl: 'https://example.com/hooks/vri',
+  webhookSecret: 'your-shared-secret',
+});
+```
+
+Verify the signature in your handler with `verifyWebhookSignature` -
+always against the raw body, never re-serialized JSON:
+
+```typescript
+import { verifyWebhookSignature } from 'verirouteintel';
+
+// Express: use a raw body parser for this route, NOT express.json()
+app.post('/hooks/vri', express.raw({ type: 'application/json' }), async (req, res) => {
+  const signature = req.header('X-Webhook-Signature') ?? '';
+  const valid = await verifyWebhookSignature(req.body, signature, 'your-shared-secret');
+  if (!valid) return res.status(401).end();
+
+  const event = JSON.parse(req.body.toString('utf8'));
+  console.log(event.job.id, event.job.status);
+  res.status(204).end();
+});
+```
+
+Webhook URLs must be publicly reachable HTTPS/HTTP addresses; delivery is
+retried on failure and your endpoint should answer 2xx within 10 seconds.
 
 ## Error Handling
 
@@ -307,6 +449,34 @@ const vri = new VRI('your_api_key');
 - [API Documentation](https://verirouteintel.com/api-docs)
 - [Get API Key](https://verirouteintel.com/register)
 - [Pricing](https://verirouteintel.com/pricing)
+
+## Changelog
+
+### 1.3.0
+
+- Async Jobs API: `submitJob()` (up to 100,000 numbers), `jobStatus()`,
+  `jobResults()` (result CSV download), `listJobs()`
+- `verifyWebhookSignature()` helper for HMAC-SHA256 verification of
+  job-completion webhooks (WebCrypto-based; works in Node 18+, Deno, Bun)
+- New endpoints: `spamEnhanced()` (multi-source composite scoring),
+  `usageAll()` (all API keys), `exportHistory()` (CSV export),
+  `pricing()` (rate card), `status()` (platform status)
+- Bulk results fixed: bulk LRN rows now populate `lrn`, `carrier`,
+  `enhanced`, and `messaging` (the rows use `lrn_value` / `voice_provider` /
+  `enhanced_lrn_data` / flat `messaging_*` field names); bulk CNAM rows now
+  populate `cnam` (rows use `cnam_record`); batch spam rows now populate
+  `source` and `cached` (rows use `spam_source` / `spam_cached`)
+- `cnam()` now populates `spamType` (the API returns snake_case `spam_type`)
+- `spamReport()` now returns the real response fields (`phoneNumber`,
+  `reportType`, `reportedAt`, `complaintCount`); the legacy `reportId` /
+  `carrierId` / `carrierName` properties remain but always read 0/null
+- `usage()` now exposes the `apiKey` the report covers
+- Typed errors (`InsufficientBalanceError`, etc.) now also raised for the
+  flat `{ error, code }` response format used by the jobs endpoints
+- Every typed result preserves the untransformed response on `raw`, so
+  future API fields are never silently dropped
+- Bulk fixes: CNAM parsed as a plain string, per-number failures surfaced
+  in `errors`, canonical bulk parameter names
 
 ## License
 

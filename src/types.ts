@@ -33,6 +33,8 @@ export interface CnamResult {
   cnam: string | null;
   /** Spam classification if includeSpam was true */
   spamType?: 'NONE' | 'SPAM' | 'SCAM' | 'ROBOCALL' | 'TELEMARKETER';
+  /** The untransformed response item - unrecognized fields are preserved here */
+  raw?: Record<string, unknown>;
 }
 
 export interface CnamResponse {
@@ -134,6 +136,8 @@ export interface LrnResult {
   cnam?: CnamData;
   /** Trust data (when includeTrust is true) */
   trust?: TrustData;
+  /** The untransformed response item - unrecognized fields are preserved here */
+  raw?: Record<string, unknown>;
 }
 
 // ============================================================================
@@ -161,6 +165,8 @@ export interface TrustResult {
   lastReported: string | null;
   /** Additional details */
   details: string;
+  /** The untransformed response item - unrecognized fields are preserved here */
+  raw?: Record<string, unknown>;
 }
 
 /** Raw API response for trust endpoint (uses snake_case from API) */
@@ -208,6 +214,8 @@ export interface TrustResultV2 {
   trustLevel: 'high' | 'medium' | 'low';
   /** ISO 8601 timestamp of when data was last updated */
   lastUpdated: string;
+  /** The untransformed response item - unrecognized fields are preserved here */
+  raw?: Record<string, unknown>;
 }
 
 /** Raw API response for trust v2 endpoint (uses snake_case from API) */
@@ -251,6 +259,50 @@ export interface SpamResult {
   cached: boolean;
   /** Data source */
   source: string;
+  /** The untransformed response item - unrecognized fields are preserved here */
+  raw?: Record<string, unknown>;
+}
+
+export interface EnhancedSpamOptions {
+  /** Query crowdsourced web sources (default: true) */
+  includeWebSources?: boolean;
+  /** Include Google Custom Search (default: false, has additional provider-side costs) */
+  includeGoogle?: boolean;
+}
+
+export interface EnhancedSpamResult {
+  /** The phone number queried */
+  phoneNumber: string;
+  /** Whether this number is flagged as spam */
+  isSpam: boolean;
+  /** Whether this number is flagged as robocall */
+  isRobocall: boolean;
+  /** Whether this number is flagged as scam */
+  isScam: boolean;
+  /** Composite spam score, 0-1 */
+  spamScore: number;
+  /** Composite robocall score, 0-1 */
+  robocallScore: number;
+  /** Composite scam score, 0-1 */
+  scamScore: number;
+  /** Overall confidence in the verdict, 0-1 */
+  confidence: number;
+  /** Total complaints found across sources */
+  totalComplaints: number;
+  /** Sources that returned a finding */
+  sources: string[];
+  /** Complaint categories (e.g. scam, robocall, telemarketer) */
+  categories: string[];
+  /** Per-source result details */
+  sourceDetails: Record<string, unknown>[];
+  /** When the lookup ran (ISO 8601) */
+  lookupTime: string | null;
+  /** Lookup duration in milliseconds */
+  lookupDurationMs: number | null;
+  /** Error message if the aggregation partially failed */
+  error: string | null;
+  /** The untransformed response item - unrecognized fields are preserved here */
+  raw?: Record<string, unknown>;
 }
 
 // ============================================================================
@@ -279,14 +331,24 @@ export interface SpamReportOptions {
 export interface SpamReportResult {
   /** Whether the report was successful */
   success: boolean;
-  /** Report ID for reference */
-  reportId: number;
-  /** Carrier ID if identified */
-  carrierId: number | null;
-  /** Carrier name if identified */
-  carrierName: string | null;
   /** Confirmation message */
   message: string;
+  /** The reported number in E.164 format */
+  phoneNumber: string | null;
+  /** The report type recorded */
+  reportType: string | null;
+  /** When the report was recorded (ISO 8601) */
+  reportedAt: string | null;
+  /** Total complaints on record for this number */
+  complaintCount: number | null;
+  /** Legacy field - the current API does not return it (reads 0) */
+  reportId: number;
+  /** Legacy field - the current API does not return it (reads null) */
+  carrierId: number | null;
+  /** Legacy field - the current API does not return it (reads null) */
+  carrierName: string | null;
+  /** The untransformed response - unrecognized fields are preserved here */
+  raw?: Record<string, unknown>;
 }
 
 // ============================================================================
@@ -306,6 +368,8 @@ export interface MessagingResult {
   messagingCountryCode: string;
   /** Reference ID for this lookup */
   referenceId: string;
+  /** The untransformed response - unrecognized fields are preserved here */
+  raw?: Record<string, unknown>;
 }
 
 // ============================================================================
@@ -335,6 +399,8 @@ export interface AnalyticsResult {
     date: string;
     count: number;
   }>;
+  /** The untransformed response - unrecognized fields are preserved here */
+  raw?: Record<string, unknown>;
 }
 
 // ============================================================================
@@ -374,6 +440,46 @@ export interface UsageResult {
     count: number;
     spent: number;
   }>;
+  /** The API key this report covers ({id, alias}); undefined for usageAll() */
+  apiKey?: {
+    id: number;
+    alias: string;
+  };
+}
+
+// ============================================================================
+// Export & Status Types
+// ============================================================================
+
+export interface ExportHistoryOptions {
+  /** ISO date (YYYY-MM-DD), default 30 days ago */
+  startDate?: string;
+  /** ISO date (YYYY-MM-DD), default today */
+  endDate?: string;
+  /** Maximum records (default 10000, capped at 50000) */
+  limit?: number;
+}
+
+export interface StatusComponent {
+  /** Component key (web, api, provider, database, cache, workers) */
+  key: string;
+  /** Human-readable component name */
+  name: string;
+  /** operational, degraded, or outage */
+  status: string;
+  /** Detail message when not operational */
+  detail: string | null;
+}
+
+export interface SystemStatusResult {
+  /** Overall status - the worst component (operational, degraded, outage) */
+  status: string;
+  /** When the status was computed (ISO 8601) */
+  updatedAt: string;
+  /** Per-component status */
+  components: StatusComponent[];
+  /** The untransformed response - unrecognized fields are preserved here */
+  raw?: Record<string, unknown>;
 }
 
 // ============================================================================
@@ -414,6 +520,118 @@ export interface BulkSpamResult {
   summary?: Record<string, unknown>;
   billing?: Record<string, unknown>;
   timing?: Record<string, unknown>;
+}
+
+// ============================================================================
+// Async Job Types
+// ============================================================================
+
+export type JobStatus =
+  | 'PENDING'
+  | 'SUBMITTED'
+  | 'RUNNING'
+  | 'AWAITING_PROVIDER'
+  | 'COMPLETED'
+  | 'FAILED';
+
+export interface SubmitJobOptions {
+  /** Include LRN/carrier data (default: true) */
+  includeLrn?: boolean;
+  /** Include enhanced LRN data (city, state, ZIP, timezone, etc.) */
+  includeEnhanced?: boolean;
+  /** Include CNAM (caller name) data */
+  includeCnam?: boolean;
+  /** Include spam/trust data */
+  includeTrust?: boolean;
+  /** Include messaging provider data */
+  includeMessaging?: boolean;
+  /** HTTPS URL to POST a job.completed event to when the job finishes */
+  webhookUrl?: string;
+  /** Shared secret for the webhook HMAC-SHA256 signature */
+  webhookSecret?: string;
+}
+
+export interface JobInvalidExample {
+  /** The rejected input as submitted */
+  input: string | null;
+  /** Why it was rejected */
+  error: string | null;
+}
+
+export interface JobSummary {
+  /** Numbers submitted (before dedup) */
+  submitted: number;
+  /** Unique valid numbers the job will process */
+  unique: number;
+  /** Duplicates removed (charged once) */
+  duplicatesRemoved: number;
+  /** Invalid numbers skipped (never charged) */
+  invalid: number;
+  /** Numbers processed so far */
+  processed: number;
+  /** Numbers that failed */
+  failed: number;
+  /** Up to 5 examples of invalid inputs (submit response only) */
+  invalidExamples: JobInvalidExample[];
+}
+
+export interface JobOptionsInfo {
+  lrn: boolean;
+  enhancedLrn: boolean;
+  cnam: boolean;
+  spam: boolean;
+  messagingProvider: boolean;
+}
+
+export interface JobBilling {
+  /** Amount reserved from your balance at submission */
+  estimatedCost: number | null;
+  /** Actual cost, settled on completion */
+  actualCost: number | null;
+  billingStatus: string | null;
+}
+
+export interface JobTiming {
+  submittedAt: string | null;
+  startedAt: string | null;
+  completedAt: string | null;
+  durationMs: number | null;
+}
+
+export interface JobWebhookInfo {
+  /** Whether a webhook_url was supplied at submission */
+  configured: boolean;
+  /** Delivery status (SUCCESS, FAILED, PENDING) or null */
+  status: string | null;
+}
+
+export interface JobLinks {
+  statusUrl: string | null;
+  /** Set once the job completes and results are downloadable */
+  resultsUrl: string | null;
+}
+
+export interface JobResult {
+  /** Job id (UUID) */
+  jobId: string;
+  /** Current job status */
+  status: JobStatus;
+  summary: JobSummary;
+  options: JobOptionsInfo;
+  billing: JobBilling;
+  timing: JobTiming;
+  webhook: JobWebhookInfo;
+  links: JobLinks;
+  /** Failure reason when status is FAILED */
+  errorMessage: string | null;
+  /** The untransformed response - unrecognized fields are preserved here */
+  raw?: Record<string, unknown>;
+}
+
+export interface JobListResult {
+  /** Most recent jobs, newest first (up to 50) */
+  jobs: JobResult[];
+  count: number;
 }
 
 // ============================================================================

@@ -1,6 +1,6 @@
 {
   "name": "verirouteintel",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "description": "Official VeriRoute Intel SDK for phone number intelligence - CNAM, LRN, carrier lookup, spam detection",
   "main": "dist/index.js",
   "module": "dist/index.mjs",
@@ -40,14 +40,14 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/iamdavid-vaughan/verirouteintel-node.git"
+    "url": "git+https://github.com/verirouteintel/verirouteintel-node.git"
   },
   "homepage": "https://verirouteintel.com/api-docs",
   "bugs": {
     "url": "https://github.com/iamdavid-vaughan/verirouteintel-node/issues"
   },
   "engines": {
-    "node": ">=16"
+    "node": ">=18"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",

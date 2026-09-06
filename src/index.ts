@@ -29,6 +29,9 @@
 // Main client
 export { VeriRoute, VRI } from './client';
 
+// Webhooks
+export { verifyWebhookSignature } from './webhooks';
+
 // Types
 export type {
   VeriRouteConfig,
@@ -42,6 +45,8 @@ export type {
   TrustResult,
   TrustResponse,
   SpamResult,
+  EnhancedSpamOptions,
+  EnhancedSpamResult,
   SpamReportType,
   SpamReportOptions,
   SpamReportResult,
@@ -50,9 +55,23 @@ export type {
   AnalyticsResult,
   UsageOptions,
   UsageResult,
+  ExportHistoryOptions,
+  StatusComponent,
+  SystemStatusResult,
   BulkCnamResult,
   BulkLrnResult,
   BulkSpamResult,
+  JobStatus,
+  SubmitJobOptions,
+  JobResult,
+  JobListResult,
+  JobSummary,
+  JobOptionsInfo,
+  JobBilling,
+  JobTiming,
+  JobWebhookInfo,
+  JobLinks,
+  JobInvalidExample,
   VeriRouteErrorDetails,
   ErrorCode,
 } from './types';
